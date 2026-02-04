@@ -1,1 +1,11 @@
+fastapi
+uvicorn
+pandas
+numpy
+requests
+faiss-cpu
+sentence-transformers
+PyPDF2
+streamlit
+python-dotenv
 
