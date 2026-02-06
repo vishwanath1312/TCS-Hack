@@ -1,133 +1,158 @@
-import os
-import json
-import requests
 import streamlit as st
-from dotenv import load_dotenv
+import os
+import requests
+import json
+from datetime import datetime
 
-# --------------------------------------------------
-# Load environment variables (local dev only)
-# --------------------------------------------------
-load_dotenv()
+# ===============================
+# CONFIG
+# ===============================
+APP_API_KEY = os.getenv("APP_API_KEY")          # Your app-level auth
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")    # OpenAI key
 
-# --------------------------------------------------
-# App Configuration
-# --------------------------------------------------
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+OPENAI_MODEL = "gpt-4.1-mini"
+
+if not OPENAI_API_KEY:
+    st.error("❌ OPENAI_API_KEY not set")
+    st.stop()
+
+if not APP_API_KEY:
+    st.error("❌ APP_API_KEY not set")
+    st.stop()
+
+# ===============================
+# PAGE SETUP
+# ===============================
 st.set_page_config(
-    page_title="LLM Diagnostic Assistant",
+    page_title="Manufacturing Diagnostic Agent",
     page_icon="🧠",
-    layout="centered"
+    layout="wide"
 )
 
-st.title("🧠 Manufacturing Diagnostic Assistant")
-st.caption("Streamlit + LLM | GitHub & Streamlit Cloud Ready")
+st.title("🧠 Manufacturing Diagnostic Agent")
+st.caption("Streamlit + OpenAI (Responses API)")
 
-# --------------------------------------------------
-# Environment Variables
-# --------------------------------------------------
-API_KEY = os.getenv("API_KEY")
-
-LLM_API_KEY = os.getenv("LLM_API_KEY")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4.1-mini")
-
-# --------------------------------------------------
-# Basic validation
-# --------------------------------------------------
-if not API_KEY:
-    st.error("❌ API_KEY is missing. Set it in environment variables.")
-    st.stop()
-
-if not LLM_API_KEY:
-    st.error("❌ LLM_API_KEY is missing. Set it in environment variables.")
-    st.stop()
-
-# --------------------------------------------------
-# Sidebar
-# --------------------------------------------------
+# ===============================
+# SIMPLE API-KEY PROTECTION
+# ===============================
 with st.sidebar:
-    st.header("⚙️ Configuration")
-    st.write(f"**Model:** `{LLM_MODEL}`")
-    st.write(f"**Endpoint:** `{LLM_BASE_URL}`")
-    st.markdown("---")
-    st.info("Keys are read securely from environment variables.")
+    st.header("🔐 Access Control")
+    user_key = st.text_input("Enter App API Key", type="password")
 
-# --------------------------------------------------
-# LLM Call Function (Provider-agnostic)
-# --------------------------------------------------
+    if user_key != APP_API_KEY:
+        st.warning("Unauthorized")
+        st.stop()
+
+    st.success("Authorized ✅")
+
+# ===============================
+# INPUTS
+# ===============================
+st.subheader("📝 Issue Description")
+issue_description = st.text_area(
+    "Describe the machine issue",
+    placeholder="Sudden temperature rise and vibration in spindle motor",
+    height=120
+)
+
+st.subheader("👷 Operator Notes")
+operator_notes = st.text_area(
+    "Optional notes",
+    placeholder="Noise observed before shutdown",
+    height=100
+)
+
+st.subheader("📊 Sample Sensor Logs (JSON)")
+default_logs = [
+    {
+        "timestamp": "2025-02-01T10:00:00",
+        "temperature_c": 72,
+        "pressure_bar": 5.2,
+        "vibration_mm_s": 1.1,
+        "downtime_min": 0
+    },
+    {
+        "timestamp": "2025-02-01T10:10:00",
+        "temperature_c": 94,
+        "pressure_bar": 4.1,
+        "vibration_mm_s": 3.8,
+        "downtime_min": 12
+    }
+]
+
+logs_text = st.text_area(
+    "Logs",
+    value=json.dumps(default_logs, indent=2),
+    height=220
+)
+
+# ===============================
+# LLM CALL (NEW RESPONSES API)
+# ===============================
 def call_llm(prompt: str) -> str:
-    """
-    Works with:
-    - OpenAI compatible APIs
-    - Azure / TCS GenAI Lab compatible APIs
-    """
-
     headers = {
-        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json"
     }
 
     payload = {
-        "model": LLM_MODEL,
-        "messages": [
-            {"role": "system", "content": "You are an expert manufacturing diagnostic assistant."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.3
+        "model": OPENAI_MODEL,
+        "input": prompt
     }
 
+    response = requests.post(
+        f"{OPENAI_BASE_URL}/responses",
+        headers=headers,
+        json=payload,
+        timeout=60
+    )
+
+    response.raise_for_status()
+    data = response.json()
+
+    return data["output"][0]["content"][0]["text"]
+
+# ===============================
+# DIAGNOSE
+# ===============================
+if st.button("🧪 Run Diagnostic", type="primary"):
     try:
-        response = requests.post(
-            f"{LLM_BASE_URL}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=60
-        )
+        logs = json.loads(logs_text)
 
-        response.raise_for_status()
-        data = response.json()
+        prompt = f"""
+You are an industrial diagnostics AI.
 
-        return data["choices"][0]["message"]["content"]
+Analyze the following manufacturing issue and return VALID JSON with:
+- issue_summary
+- probable_root_causes
+- confidence_score (0–1)
+- recommended_actions
 
-    except requests.exceptions.RequestException as e:
-        return f"❌ Request error: {e}"
-    except (KeyError, IndexError):
-        return "❌ Unexpected LLM response format."
+ISSUE:
+{issue_description}
 
-# --------------------------------------------------
-# UI Input
-# --------------------------------------------------
-st.subheader("🔍 Describe the Problem")
+OPERATOR NOTES:
+{operator_notes}
 
-user_input = st.text_area(
-    "Enter machine issue, symptoms, or logs:",
-    height=160,
-    placeholder="Example: CNC machine shows spindle vibration and overheating after 2 hours of operation..."
-)
+SENSOR LOGS:
+{json.dumps(logs, indent=2)}
 
-# --------------------------------------------------
-# Action Button
-# --------------------------------------------------
-if st.button("Analyze with LLM 🚀"):
-    if not user_input.strip():
-        st.warning("Please enter a problem description.")
-    else:
-        with st.spinner("Analyzing..."):
-            prompt = f"""
-Analyze the following manufacturing issue and provide:
-1. Probable root causes
-2. Diagnostic steps
-3. Recommended corrective actions
-
-Problem Description:
-{user_input}
+Return only JSON.
 """
+
+        with st.spinner("Analyzing..."):
             result = call_llm(prompt)
 
         st.subheader("🧾 Diagnostic Report")
-        st.markdown(result)
+        st.json(json.loads(result))
 
-# --------------------------------------------------
-# Footer
-# --------------------------------------------------
-st.markdown("---")
-st.caption("© 2026 | Streamlit + LLM Diagnostic System")
+    except json.JSONDecodeError:
+        st.error("❌ Logs or LLM output is not valid JSON")
+        st.text(result)
+
+    except requests.HTTPError as e:
+        st.error(f"❌ LLM Request Error: {e}")
+
+    except Exception as e:
+        st.error(f"❌ Unexpected Error: {e}")
