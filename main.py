@@ -1,178 +1,181 @@
+import os
+import time
+import json
+import faiss
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.metrics.pairwise import cosine_similarity
 
-# --------------------------------------------------
-# APP CONFIG
-# --------------------------------------------------
-st.set_page_config(
-    page_title="Manufacturing Diagnostic Agent",
-    layout="wide"
-)
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import StandardScaler
 
-st.title("🏭 Manufacturing Diagnostic Agent (RAG + Anomaly Detection)")
+from reportlab.platypus import SimpleDocTemplate, Paragraph
+from reportlab.lib.styles import getSampleStyleSheet
 
-# --------------------------------------------------
-# LOAD CSV
-# --------------------------------------------------
-@st.cache_data
-def load_data():
-    df = pd.read_csv("sensor_logs.csv")
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    return df
+from openai import OpenAI
 
-df = load_data()
+# ==========================
+# CONFIG
+# ==========================
+st.set_page_config(page_title="Manufacturing Diagnostics AI", layout="wide")
 
-# --------------------------------------------------
-# MACHINE SELECTION
-# --------------------------------------------------
-st.sidebar.header("⚙️ Configuration")
+LLM_MODEL = "gpt-4.1-mini"
+client = OpenAI(api_key=os.getenv("LLM_API_KEY"))
 
-machine_ids = sorted(df["machine_id"].unique())
-selected_machine = st.sidebar.selectbox("Select Machine", machine_ids)
+FEATURES = ["temperature", "vibration", "pressure", "rpm"]
 
-mdf = df[df["machine_id"] == selected_machine].reset_index(drop=True)
+# ==========================
+# UTILITIES
+# ==========================
+def anomaly_confidence(score):
+    return min(1.0, abs(score))
 
-# --------------------------------------------------
-# THRESHOLDS (Industry realistic)
-# --------------------------------------------------
-TEMP_CRITICAL = 90.0        # °C
-VIB_CRITICAL = 3.0          # mm/s
-PRESS_LOW = 1.0             # bar
-DOWNTIME_TRIGGER = 5        # minutes
+def create_pdf(report, filename="diagnostic_report.pdf"):
+    doc = SimpleDocTemplate(filename)
+    styles = getSampleStyleSheet()
+    story = []
 
-# --------------------------------------------------
-# ANOMALY DETECTION
-# --------------------------------------------------
-anomalies = {
-    "temperature": mdf[mdf["temperature_c"] >= TEMP_CRITICAL],
-    "vibration": mdf[mdf["vibration_mm_s"] >= VIB_CRITICAL],
-    "pressure": mdf[mdf["pressure_bar"] <= PRESS_LOW],
-    "downtime": mdf[mdf["downtime_min"] >= DOWNTIME_TRIGGER],
-}
+    for k, v in report.items():
+        story.append(Paragraph(f"<b>{k}</b>: {v}", styles["Normal"]))
 
-anomaly_detected = any(len(v) > 0 for v in anomalies.values())
+    doc.build(story)
+    return filename
 
-# --------------------------------------------------
-# VISUALIZATION
-# --------------------------------------------------
-st.subheader(f"📈 Sensor Trends — {selected_machine}")
+# ==========================
+# UI
+# ==========================
+st.title("🏭 Manufacturing Diagnostics AI (RAG + LLM)")
 
-fig, ax = plt.subplots(3, 1, figsize=(10, 7), sharex=True)
+uploaded_file = st.file_uploader("📂 Upload Sensor CSV", type=["csv"])
 
-ax[0].plot(mdf["timestamp"], mdf["temperature_c"])
-ax[0].axhline(TEMP_CRITICAL, color="red", linestyle="--")
-ax[0].set_ylabel("Temperature (°C)")
+if uploaded_file:
+    df = pd.read_csv(uploaded_file)
+    st.success("CSV Loaded")
 
-ax[1].plot(mdf["timestamp"], mdf["vibration_mm_s"])
-ax[1].axhline(VIB_CRITICAL, color="red", linestyle="--")
-ax[1].set_ylabel("Vibration (mm/s)")
+    st.dataframe(df.head())
 
-ax[2].plot(mdf["timestamp"], mdf["pressure_bar"])
-ax[2].axhline(PRESS_LOW, color="red", linestyle="--")
-ax[2].set_ylabel("Pressure (bar)")
+    # ==========================
+    # MODEL TRAINING
+    # ==========================
+    scaler = StandardScaler()
+    X = scaler.fit_transform(df[FEATURES])
 
-st.pyplot(fig)
+    iso_forest = IsolationForest(contamination=0.1, random_state=42)
+    iso_forest.fit(X)
 
-# --------------------------------------------------
-# SUMMARY METRICS
-# --------------------------------------------------
-st.subheader("📊 Summary Statistics")
+    df["anomaly_score"] = iso_forest.decision_function(X)
+    df["anomaly"] = iso_forest.predict(X)
 
-summary = {
-    "Max Temperature (°C)": float(mdf["temperature_c"].max()),
-    "Max Vibration (mm/s)": float(mdf["vibration_mm_s"].max()),
-    "Min Pressure (bar)": float(mdf["pressure_bar"].min()),
-    "Total Downtime (min)": int(mdf["downtime_min"].max()),
-}
+    # ==========================
+    # FAISS INDEX
+    # ==========================
+    faiss_index = faiss.IndexFlatL2(X.shape[1])
+    faiss_index.add(X.astype("float32"))
 
-st.json(summary)
+    st.subheader("📊 Anomaly Overview")
+    st.line_chart(df.groupby("machine_id")["anomaly_score"].mean())
 
-# --------------------------------------------------
-# SIMPLE RAG KNOWLEDGE BASE (FAISS-LIKE)
-# --------------------------------------------------
-knowledge_docs = [
-    "High vibration above 3.0 mm/s combined with rising temperature indicates bearing failure.",
-    "Progressive temperature increase above 90°C suggests lubrication breakdown.",
-    "Pressure collapse with vibration rise indicates seal or flow path failure.",
-    "Extended downtime following vibration spikes confirms mechanical failure."
-]
+    # ==========================
+    # REAL-TIME USER INPUT
+    # ==========================
+    st.sidebar.header("🔮 Live Prediction")
 
-def simple_embed(texts):
-    # simple numeric embedding (deterministic, cloud-safe)
-    return np.array([[len(t), sum(map(ord, t)) % 1000] for t in texts])
+    with st.sidebar.form("predict_form"):
+        machine_id = st.text_input("Machine ID", "M-001")
+        temperature = st.number_input("Temperature", 0.0, 200.0, 85.0)
+        vibration = st.number_input("Vibration", 0.0, 1.0, 0.05)
+        pressure = st.number_input("Pressure", 0.0, 20.0, 5.2)
+        rpm = st.number_input("RPM", 0, 5000, 1450)
 
-doc_embeddings = simple_embed(knowledge_docs)
+        simulate_stream = st.checkbox("Simulate real-time stream")
+        submit = st.form_submit_button("Predict")
 
-# --------------------------------------------------
-# DIAGNOSTIC LOGIC (RAG + RULES)
-# --------------------------------------------------
-if anomaly_detected:
-    st.subheader("🧾 Diagnostic Report")
+    if submit:
+        user_df = pd.DataFrame([{
+            "machine_id": machine_id,
+            "temperature": temperature,
+            "vibration": vibration,
+            "pressure": pressure,
+            "rpm": rpm
+        }])
 
-    query_text = f"""
-    Machine {selected_machine} shows temperature rise to {summary['Max Temperature (°C)']}°C,
-    vibration reaching {summary['Max Vibration (mm/s)']} mm/s,
-    pressure dropping to {summary['Min Pressure (bar)']} bar,
-    with downtime of {summary['Total Downtime (min)']} minutes.
-    """
+        # ==========================
+        # STREAMING SIMULATION
+        # ==========================
+        if simulate_stream:
+            st.info("Streaming input...")
+            for _ in range(3):
+                time.sleep(0.5)
+                st.write("Receiving sensor packet...")
 
-    query_embedding = simple_embed([query_text])
-    scores = cosine_similarity(query_embedding, doc_embeddings)[0]
-    top_docs = [knowledge_docs[i] for i in scores.argsort()[-2:][::-1]]
+        # ==========================
+        # PREDICTION
+        # ==========================
+        X_user = scaler.transform(user_df[FEATURES])
+        score = iso_forest.decision_function(X_user)[0]
+        is_anomaly = iso_forest.predict(X_user)[0] == -1
+        confidence = anomaly_confidence(score)
 
-    diagnosis = {
-        "machine_id": selected_machine,
-        "issue_summary": "Progressive mechanical and thermal failure detected",
-        "root_causes": [
-            "Bearing degradation",
-            "Lubrication failure",
-            "Seal or pressure flow collapse"
-        ],
-        "confidence_score": 0.94,
-        "evidence": {
-            "temperature_peak_c": summary["Max Temperature (°C)"],
-            "vibration_peak_mm_s": summary["Max Vibration (mm/s)"],
-            "pressure_min_bar": summary["Min Pressure (bar)"],
-            "downtime_minutes": summary["Total Downtime (min)"]
-        },
-        "retrieved_knowledge": top_docs,
-        "recommended_actions": [
-            "Immediate shutdown and bearing inspection",
-            "Lubrication system flush and oil analysis",
-            "Seal and pressure line inspection",
-            "Enable vibration-based predictive maintenance"
-        ],
-        "risk_level": "Critical"
-    }
+        # ==========================
+        # FAISS RAG
+        # ==========================
+        D, I = faiss_index.search(X_user.astype("float32"), 3)
+        context = df.iloc[I[0]].to_dict(orient="records")
 
-    st.json(diagnosis)
+        # ==========================
+        # LLM DIAGNOSTICS
+        # ==========================
+        prompt = f"""
+You are an industrial diagnostics expert.
 
-else:
-    st.success("✅ No anomalies detected — system operating normally")
+Sensor Input:
+{user_df.to_json(orient="records")}
 
-# --------------------------------------------------
-# FLEET OVERVIEW
-# --------------------------------------------------
-st.subheader("🏭 Fleet Health Overview")
+Anomaly: {is_anomaly}
+Score: {score}
+Confidence: {confidence}
 
-fleet = (
-    df.groupby("machine_id")
-      .agg(
-          max_temp=("temperature_c", "max"),
-          max_vibration=("vibration_mm_s", "max"),
-          max_downtime=("downtime_min", "max")
-      )
-      .reset_index()
-)
+Similar cases:
+{json.dumps(context)}
 
-fleet["status"] = np.where(
-    (fleet["max_temp"] > TEMP_CRITICAL) |
-    (fleet["max_vibration"] > VIB_CRITICAL),
-    "⚠️ Attention Required",
-    "✅ Normal"
-)
+Return STRICT JSON with:
+status, severity, root_cause, recommended_action
+"""
 
-st.dataframe(fleet)
+        response = client.responses.create(
+            model=LLM_MODEL,
+            input=prompt
+        )
+
+        diagnosis = response.output_text
+
+        # ==========================
+        # FINAL RESULT
+        # ==========================
+        result = {
+            "machine_id": machine_id,
+            "anomaly": bool(is_anomaly),
+            "anomaly_score": round(float(score), 4),
+            "confidence": round(confidence, 3),
+            "diagnosis": diagnosis
+        }
+
+        st.subheader("🧾 Prediction Result")
+        st.json(result)
+
+        # ==========================
+        # EXPORT
+        # ==========================
+        st.download_button(
+            "⬇️ Download JSON",
+            data=json.dumps(result, indent=2),
+            file_name="prediction.json"
+        )
+
+        pdf_file = create_pdf(result)
+        with open(pdf_file, "rb") as f:
+            st.download_button(
+                "⬇️ Download PDF",
+                data=f,
+                file_name="prediction.pdf"
+            )
