@@ -14,7 +14,10 @@ import uuid
 import PyPDF2
 import re
 
-# -------------------- CONFIG --------------------
+# ============================================================
+# CONFIG
+# ============================================================
+
 API_KEY = os.getenv("API_KEY")
 if not API_KEY:
     raise RuntimeError("API_KEY environment variable not set")
@@ -23,15 +26,19 @@ LLM_API_KEY = os.getenv("LLM_API_KEY")
 if not LLM_API_KEY:
     raise RuntimeError("LLM_API_KEY environment variable not set")
 
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://genailab.tcs.in/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "azure_ai/genailab-maas-DeepSeek-V3-0324")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4.1-mini")
 
 EMBEDDING_MODEL_NAME = "thenlper/gte-large"
-embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
 EMBEDDING_DIM = 1024
 MAX_FILE_SIZE_MB = 10
 
-# -------------------- APP SETUP --------------------
+embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+
+# ============================================================
+# APP SETUP
+# ============================================================
+
 app = FastAPI(title="Manufacturing Diagnostic Agent")
 
 app.add_middleware(
@@ -41,6 +48,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ============================================================
+# DIRECTORIES
+# ============================================================
 
 DATA_DIR = Path("data")
 LOGS_DIR = DATA_DIR / "logs"
@@ -55,7 +66,10 @@ for d in [LOGS_DIR, NOTES_DIR, MANUALS_DIR, INCIDENTS_DIR, VECTOR_DIR]:
 INDEX_PATH = VECTOR_DIR / "faiss.index"
 META_PATH = VECTOR_DIR / "metadata.json"
 
-# -------------------- API KEY MIDDLEWARE --------------------
+# ============================================================
+# API KEY MIDDLEWARE
+# ============================================================
+
 @app.middleware("http")
 async def api_key_middleware(request: Request, call_next):
     if request.url.path.startswith("/docs") or request.url.path.startswith("/openapi.json"):
@@ -67,7 +81,10 @@ async def api_key_middleware(request: Request, call_next):
 
     return await call_next(request)
 
-# -------------------- FILE UTILS --------------------
+# ============================================================
+# FILE UTILITIES
+# ============================================================
+
 def validate_file(file: UploadFile, allowed_extensions: list):
     ext = file.filename.split(".")[-1].lower()
     if ext not in allowed_extensions:
@@ -84,7 +101,10 @@ def save_file(upload_file: UploadFile, destination: Path):
     with destination.open("wb") as buffer:
         shutil.copyfileobj(upload_file.file, buffer)
 
-# -------------------- TEXT EXTRACTION --------------------
+# ============================================================
+# TEXT EXTRACTION
+# ============================================================
+
 def extract_text_from_file(path: Path):
     if path.suffix.lower() == ".pdf":
         reader = PyPDF2.PdfReader(str(path))
@@ -94,18 +114,25 @@ def extract_text_from_file(path: Path):
     elif path.suffix.lower() == ".csv":
         df = pd.read_csv(path)
         return df.to_csv(index=False)
-    else:
-        return ""
+    return ""
 
-# -------------------- METADATA EXTRACTION --------------------
+# ============================================================
+# METADATA EXTRACTION
+# ============================================================
+
 def extract_machine_id(text: str):
-    match = re.search(r"(machine[_\-\s]?id|machine)\s*[:=]?\s*([A-Za-z0-9\-]+)", text, re.IGNORECASE)
-    if match:
-        return match.group(2)
-    return None
+    match = re.search(
+        r"(machine[_\-\s]?id|machine)\s*[:=]?\s*([A-Za-z0-9\-]+)",
+        text,
+        re.IGNORECASE,
+    )
+    return match.group(2) if match else None
 
-# -------------------- CHUNKING --------------------
-def chunk_text(text: str, chunk_size=500, overlap=100):
+# ============================================================
+# CHUNKING
+# ============================================================
+
+def chunk_text(text, chunk_size=500, overlap=100):
     words = text.split()
     chunks = []
     start = 0
@@ -115,7 +142,10 @@ def chunk_text(text: str, chunk_size=500, overlap=100):
         start += chunk_size - overlap
     return chunks
 
-# -------------------- VECTOR STORE --------------------
+# ============================================================
+# VECTOR STORE
+# ============================================================
+
 def load_faiss_index():
     if INDEX_PATH.exists():
         index = faiss.read_index(str(INDEX_PATH))
@@ -138,36 +168,42 @@ def add_embeddings(chunks, metadata_records):
     metadata.extend(metadata_records)
     save_faiss_index(index, metadata)
 
-# -------------------- EMBEDDING PIPELINE --------------------
+# ============================================================
+# EMBEDDING PIPELINE
+# ============================================================
+
 def process_and_embed(file_path: Path, source_type: str):
     text = extract_text_from_file(file_path)
     machine_id = extract_machine_id(text)
     chunks = chunk_text(text)
 
-    metadata_records = []
     timestamp = datetime.utcnow().isoformat()
-
-    for chunk in chunks:
-        metadata_records.append({
+    metadata_records = [
+        {
             "id": str(uuid.uuid4()),
             "source_type": source_type,
             "machine_id": machine_id,
             "file_name": file_path.name,
             "timestamp": timestamp,
-            "content": chunk
-        })
+            "content": chunk,
+        }
+        for chunk in chunks
+    ]
 
     add_embeddings(chunks, metadata_records)
 
-# -------------------- UPLOAD ENDPOINTS --------------------
+# ============================================================
+# UPLOAD ENDPOINTS
+# ============================================================
+
 @app.post("/upload/logs")
 async def upload_logs(file: UploadFile = File(...)):
     validate_file(file, ["csv", "json"])
     validate_file_size(file)
     dest = LOGS_DIR / file.filename
     save_file(file, dest)
-    process_and_embed(dest, source_type="logs")
-    return {"status": "success", "file": file.filename, "category": "logs"}
+    process_and_embed(dest, "logs")
+    return {"status": "success", "file": file.filename}
 
 @app.post("/upload/notes")
 async def upload_notes(file: UploadFile = File(...)):
@@ -175,8 +211,8 @@ async def upload_notes(file: UploadFile = File(...)):
     validate_file_size(file)
     dest = NOTES_DIR / file.filename
     save_file(file, dest)
-    process_and_embed(dest, source_type="notes")
-    return {"status": "success", "file": file.filename, "category": "notes"}
+    process_and_embed(dest, "notes")
+    return {"status": "success", "file": file.filename}
 
 @app.post("/upload/manuals")
 async def upload_manuals(file: UploadFile = File(...)):
@@ -184,8 +220,8 @@ async def upload_manuals(file: UploadFile = File(...)):
     validate_file_size(file)
     dest = MANUALS_DIR / file.filename
     save_file(file, dest)
-    process_and_embed(dest, source_type="manuals")
-    return {"status": "success", "file": file.filename, "category": "manuals"}
+    process_and_embed(dest, "manuals")
+    return {"status": "success", "file": file.filename}
 
 @app.post("/upload/incidents")
 async def upload_incidents(file: UploadFile = File(...)):
@@ -193,10 +229,13 @@ async def upload_incidents(file: UploadFile = File(...)):
     validate_file_size(file)
     dest = INCIDENTS_DIR / file.filename
     save_file(file, dest)
-    process_and_embed(dest, source_type="incidents")
-    return {"status": "success", "file": file.filename, "category": "incidents"}
+    process_and_embed(dest, "incidents")
+    return {"status": "success", "file": file.filename}
 
-# -------------------- RETRIEVAL API --------------------
+# ============================================================
+# RETRIEVAL
+# ============================================================
+
 @app.post("/retrieve")
 async def retrieve(payload: dict):
     issue_description = payload.get("issue_description")
@@ -207,117 +246,66 @@ async def retrieve(payload: dict):
     if index.ntotal == 0:
         return {"results": []}
 
-    query_embedding = embedding_model.encode([issue_description], normalize_embeddings=True)
-    distances, indices = index.search(np.array(query_embedding).astype("float32"), k=5)
+    query_embedding = embedding_model.encode(
+        [issue_description], normalize_embeddings=True
+    )
+    distances, indices = index.search(
+        np.array(query_embedding).astype("float32"), k=5
+    )
 
     results = []
     for rank, idx in enumerate(indices[0]):
         meta = metadata[idx]
-        results.append({
-            "source_type": meta.get("source_type"),
-            "machine_id": meta.get("machine_id"),
-            "file_name": meta.get("file_name"),
-            "timestamp": meta.get("timestamp"),
-            "content": meta.get("content"),
-            "score": float(distances[0][rank])
-        })
+        results.append(
+            {
+                "source_type": meta["source_type"],
+                "machine_id": meta["machine_id"],
+                "file_name": meta["file_name"],
+                "timestamp": meta["timestamp"],
+                "content": meta["content"],
+                "score": float(distances[0][rank]),
+            }
+        )
 
     return {"results": results}
 
-# -------------------- LOG ANALYSIS ENGINE --------------------
+# ============================================================
+# LOG ANALYSIS ENGINE
+# ============================================================
+
 class LogAnalysisEngine:
     def __init__(self, df: pd.DataFrame):
         self.df = df.copy()
         self.df["timestamp"] = pd.to_datetime(self.df["timestamp"])
-        self.df = self.df.sort_values("timestamp")
+        self.df.sort_values("timestamp", inplace=True)
 
-    def detect_temperature_spikes(self, z_threshold: float = 2.5):
+    def detect_temperature_spikes(self, z_threshold=2.5):
         temps = self.df["temperature_c"]
-        mean = temps.mean()
-        std = temps.std()
-        self.df["temp_z"] = (temps - mean) / std
+        self.df["temp_z"] = (temps - temps.mean()) / temps.std()
         return self.df[self.df["temp_z"] > z_threshold]
 
-    def detect_pressure_drops(self, drop_threshold_pct: float = 10.0):
-        self.df["pressure_pct_change"] = self.df["pressure_bar"].pct_change() * 100
+    def detect_pressure_drops(self, drop_threshold_pct=10.0):
+        self.df["pressure_pct_change"] = (
+            self.df["pressure_bar"].pct_change() * 100
+        )
         return self.df[self.df["pressure_pct_change"] < -drop_threshold_pct]
 
-    def detect_vibration_anomalies(self, vibration_threshold: float = None):
+    def detect_vibration_anomalies(self):
         vib = self.df["vibration_mm_s"]
-        if vibration_threshold is None:
-            vibration_threshold = vib.mean() + 2.5 * vib.std()
-        return self.df[self.df["vibration_mm_s"] > vibration_threshold]
-
-    def detect_downtime_clusters(self, min_cluster_size: int = 2, window_minutes: int = 60):
-        downtime_events = self.df[self.df["downtime_min"] > 0]
-        clusters = []
-        current_cluster = []
-
-        for _, row in downtime_events.iterrows():
-            if not current_cluster:
-                current_cluster.append(row)
-            else:
-                last_time = current_cluster[-1]["timestamp"]
-                if row["timestamp"] - last_time <= timedelta(minutes=window_minutes):
-                    current_cluster.append(row)
-                else:
-                    if len(current_cluster) >= min_cluster_size:
-                        clusters.append(current_cluster)
-                    current_cluster = [row]
-
-        if len(current_cluster) >= min_cluster_size:
-            clusters.append(current_cluster)
-
-        return clusters
+        threshold = vib.mean() + 2.5 * vib.std()
+        return self.df[vib > threshold]
 
     def run_all(self):
         return {
-            "temperature_spikes": self.detect_temperature_spikes().to_dict(orient="records"),
-            "pressure_drops": self.detect_pressure_drops().to_dict(orient="records"),
-            "vibration_anomalies": self.detect_vibration_anomalies().to_dict(orient="records"),
-            "downtime_clusters": [
-                [row.to_dict() for row in cluster] for cluster in self.detect_downtime_clusters()
-            ],
+            "temperature_spikes": self.detect_temperature_spikes().to_dict("records"),
+            "pressure_drops": self.detect_pressure_drops().to_dict("records"),
+            "vibration_anomalies": self.detect_vibration_anomalies().to_dict("records"),
         }
 
-# -------------------- PROMPT BUILDER --------------------
-def build_diagnostic_prompt(anomalies, operator_notes, retrieved_docs):
-    prompt = f"""
-You are an industrial diagnostics AI specializing in manufacturing production failures.
+# ============================================================
+# LLM CLIENT
+# ============================================================
 
-Analyze the following data and return a structured JSON with:
-- issue_summary
-- root_causes
-- confidence_score
-- evidence
-- recommended_actions
-
---- SENSOR ANOMALIES ---
-Temperature Spikes:
-{json.dumps(anomalies.get("temperature_spikes", []), indent=2)}
-
-Pressure Drops:
-{json.dumps(anomalies.get("pressure_drops", []), indent=2)}
-
-Vibration Anomalies:
-{json.dumps(anomalies.get("vibration_anomalies", []), indent=2)}
-
-Downtime Clusters:
-{json.dumps(anomalies.get("downtime_clusters", []), indent=2)}
-
---- OPERATOR NOTES ---
-{operator_notes}
-
---- HISTORICAL INCIDENTS & MANUAL EXCERPTS ---
-"""
-    for doc in retrieved_docs:
-        prompt += f"\nSource: {doc.get('source_type')} | File: {doc.get('file_name')} | Machine: {doc.get('machine_id')}\n"
-        prompt += doc.get("content", "")[:1200] + "\n"
-
-    prompt += "\nReturn only valid JSON."
-    return prompt.strip()
-
-# -------------------- LLM CLIENT --------------------
 def call_llm(prompt: str):
     headers = {
         "Authorization": f"Bearer {LLM_API_KEY}",
@@ -328,29 +316,49 @@ def call_llm(prompt: str):
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.4,
     }
-    response = requests.post(f"{LLM_BASE_URL}/chat/completions", headers=headers, json=payload)
+
+    response = requests.post(
+        f"{LLM_BASE_URL}/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=60,
+    )
     response.raise_for_status()
     return response.json()["choices"][0]["message"]["content"]
 
-# -------------------- DIAGNOSE ENDPOINT --------------------
+# ============================================================
+# DIAGNOSE ENDPOINT
+# ============================================================
+
 @app.post("/diagnose")
 async def diagnose(payload: dict):
     df = pd.DataFrame(payload["logs"])
-    analyzer = LogAnalysisEngine(df)
-    anomalies = analyzer.run_all()
+    anomalies = LogAnalysisEngine(df).run_all()
 
-    retrieval_results = await retrieve({"issue_description": payload.get("issue_description", "")})
-    retrieved_docs = retrieval_results.get("results", [])
+    retrieved_docs = (
+        await retrieve({"issue_description": payload.get("issue_description", "")})
+    ).get("results", [])
 
-    prompt = build_diagnostic_prompt(
-        anomalies=anomalies,
-        operator_notes=payload.get("operator_notes", ""),
-        retrieved_docs=retrieved_docs,
-    )
+    prompt = f"""
+You are an industrial diagnostics AI.
 
-    llm_output = call_llm(prompt)
+Analyze anomalies and return JSON with:
+issue_summary, root_causes, confidence_score, evidence, recommended_actions.
 
+Anomalies:
+{json.dumps(anomalies, indent=2)}
+
+Operator Notes:
+{payload.get("operator_notes", "")}
+
+Documents:
+{json.dumps(retrieved_docs[:3], indent=2)}
+
+Return ONLY valid JSON.
+"""
+
+    output = call_llm(prompt)
     try:
-        return json.loads(llm_output)
+        return json.loads(output)
     except Exception:
-        return {"raw_output": llm_output, "error": "LLM did not return valid JSON"}
+        return {"raw_output": output, "error": "Invalid JSON from LLM"}
