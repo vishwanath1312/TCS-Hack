@@ -1,23 +1,9 @@
-streamlit>=1.32.0
-
-# Data handling
-pandas>=2.2.0
-numpy>=1.26.0
-
-# Visualization
-matplotlib>=3.8.0
-plotly>=5.18.0
-
-# Machine Learning / Anomaly Detection
-scikit-learn>=1.4.0
-
-# Vector Search (RAG)
-faiss-cpu>=1.8.0
-
-# LLM (OpenAI Responses API)
-openai>=1.12.0
-
-# Utilities
-python-dotenv>=1.0.1
+streamlit
+pandas
+numpy
+scikit-learn
+faiss-cpu
+openai
+reportlab
 
 
