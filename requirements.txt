@@ -1,11 +1,6 @@
-fastapi
-uvicorn
-pandas
-numpy
+streamlit>=1.30
+altair==4.2.2
 requests
-faiss-cpu
-sentence-transformers
-PyPDF2
-streamlit
 python-dotenv
+
 
